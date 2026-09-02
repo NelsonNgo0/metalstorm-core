@@ -16,6 +16,7 @@
   },
   "files": [
     "dist",
+    "test",
     "README.md"
   ],
   "engines": {
