@@ -1,0 +1,6 @@
+# Build output. Regenerate with `npm run build`; published from `files` in
+# package.json rather than committed, so the tree never carries a stale copy
+# of itself.
+dist/
+
+node_modules/
