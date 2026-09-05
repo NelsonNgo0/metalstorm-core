@@ -24,6 +24,29 @@ A trailing `.o` marks a build whose forks came from a weighting rather than
 from hand picking. It is appended rather than woven in, so links written before
 the flag existed still read.
 
+A fifth segment carries current state: where a player actually is, as opposed
+to where the build says to go. It is appended the same way, after the flag
+slot, so a reader that predates it skips the segment and still resolves the
+build.
+
+```
+f-5-tiger.20.F8tttt_E8tttt_A8tttt_PC8tttt_IM8tttt..12_F8_E6_A4_PC-_IM0
+                                                  ^^ ^^ ^^^^^^^^^^^^^^
+                                                  |  |  one entry per system
+                                                  |  current aircraft level
+                                                  empty flag slot
+```
+
+An entry is a tree code and the level held now, 0 to 8, or `-` for explicitly
+unknown. A bare leading integer is the current aircraft level; it cannot
+collide with an entry, because entries always start with a tree code. Every
+slot is positional, so a build with no picks and no flag writes four dots:
+`f-5-tiger.20...F8_E6`.
+
+`Build.level` stays the **target**. Current aircraft level lives in this
+segment instead, so a build can aim at a tier the player's level cannot yet
+reach, which is the question a cost calculator exists to answer.
+
 Every separator survives form encoding unescaped, so four builds stay something
 a person can paste into a comment.
 
@@ -116,6 +139,22 @@ strings for the same build.
 what `write` emits. Run a hand built `Build` through `clamp` before encoding.
 It rebuilds the record in the aircraft's own tree order.
 
+## Clamp intent, preserve observation
+
+`picks` are intent, and clamping them encodes a game rule: the game would not
+let a player hold that selection, so a stale link degrades to a legal build.
+
+Current state is an observation, and nothing in it is clamped. A system level
+the aircraft level could not have reached, an aircraft level past the ceiling,
+a system the aircraft does not carry: all preserved exactly as written. Each
+one is worth surfacing rather than hiding, because it means a typo, a bug in
+whatever reported it, or a game change that moved the rules. Unifying the two
+behaviours for consistency would remove the point.
+
+Unparseable is a different matter from contradictory. A value the grammar
+cannot read has no meaning to preserve and is dropped, the way a malformed
+pick is.
+
 ## Narrow on purpose
 
 The types here cover identity, a build, the upgrade skeleton needed to place
@@ -196,10 +235,17 @@ a blanket exemption.
 npm test
 ```
 
-The suite is characterisation. Every expectation is a recording of what the
-shipped implementation actually produced: 437 assertions over all 43 aircraft,
+Two suites. `build-code.test.mjs` is the frozen contract for the format as it
+stood before the current-state segment: 437 assertions over all 43 aircraft,
 all twelve tree codes, multi build strings, the `.o` flag, level and tier
-clamping, and malformed input.
+clamping, and malformed input. Every expectation is a recording of what the
+shipped implementation actually produced, and it has to keep passing unchanged.
+
+`current-state.test.mjs` covers what the segment adds, including
+`fixtures/forward-compat.json`, which records what the reader that shipped
+before the segment did when handed a code carrying one. That file must not be
+re-recorded against a codec that understands the segment: it would record a new
+reader agreeing with itself.
 
 `test/subject.mjs` is a seam. By default it tests this package. With
 `METALSTORM_SUBJECT=original` it runs the identical assertions against the

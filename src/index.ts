@@ -42,6 +42,45 @@ export interface Build {
    * how the build is read.
    */
   optimised?: boolean;
+  /**
+   * Where the player actually is, as opposed to where the build says to go.
+   *
+   * Absent means not stated, which is not the same as a fresh aircraft. A
+   * consumer should ask rather than assume zeros.
+   */
+  current?: CurrentState;
+}
+
+/**
+ * An observation of a player's position, carried so a cost calculator can work
+ * out what is left to buy without asking them to type it in twice.
+ *
+ * CLAMP INTENT, PRESERVE OBSERVATION. `picks` are intent, and clamping them
+ * encodes a game rule: the game would not let a player hold that selection.
+ * This is an observation, and rewriting it to fit the rules would hide the
+ * three things worth seeing. A typo, a bug in whatever reported it, or a game
+ * change that moved the rules. Nothing here is clamped, and a future reader
+ * tidying that up for consistency with `picks` would be removing the point.
+ */
+export interface CurrentState {
+  /**
+   * The player's aircraft level now. `Build.level` stays the target, so a
+   * build can legally aim at a tier the current level cannot yet reach.
+   */
+  aircraftLevel?: number;
+  /**
+   * Tree name to the upgrade level held now, 0 through 8. `null` is explicitly
+   * unknown, a different state from 0 and from being absent: someone may know
+   * one system's level and not another's.
+   *
+   * Keyed by tree, so an aircraft carrying the same tree twice gets one entry
+   * covering both. That is a limitation of the build model rather than of this
+   * segment: `picks` has always been keyed the same way, so such a pair has
+   * never had separate tiers either. Separating them would mean re-keying
+   * picks, which would change the code format. A consumer that needs to charge
+   * for the duplicate reads the multiplicity off its own loadout data.
+   */
+  systems: Record<string, number | null>;
 }
 
 /**
@@ -206,6 +245,25 @@ export const MAX_BUILDS = 4;
  */
 const PICK_RE = /^([A-Z]+)(\d)([tb]*)$/;
 
+/**
+ * One entry in the current-state segment: a tree code and the level held now.
+ *
+ * "-" is explicitly unknown. The state is 0 to 8 rather than any digit,
+ * because 9 is not a level the game can produce, so it is corruption rather
+ * than an observation and there is nothing to preserve.
+ */
+const STATE_RE = /^([A-Z]+)([0-8]|-)$/;
+
+/**
+ * The current aircraft level, written bare at the front of the segment.
+ *
+ * A leading integer can never collide with an entry, which always starts with
+ * a tree code, so this needs no marker character of its own. One or two digits
+ * only: three is not a level, and accepting it would make a mangled entry look
+ * like a plausible one.
+ */
+const CURRENT_LEVEL_RE = /^\d{1,2}$/;
+
 export interface BuildCodec {
   readonly treeCodes: ReadonlyMap<string, string>;
   readonly maxAircraftLevel: number;
@@ -254,6 +312,11 @@ export function createBuildCodec(dataset: CodecDataset): BuildCodec {
     );
     if (treeNamesForJet === undefined) return { ...build, level, picks: {} };
     const optimised = build.optimised === true;
+    // Never normalised, never clamped. See CurrentState: this is an
+    // observation, and the key is omitted rather than set to undefined so a
+    // build that carried none is byte-identical to one from before the segment
+    // existed.
+    const carried = build.current === undefined ? {} : { current: build.current };
 
     const picks: Record<string, BuildPick> = {};
     for (const name of treeNamesForJet) {
@@ -270,7 +333,7 @@ export function createBuildCodec(dataset: CodecDataset): BuildCodec {
       const paths = pick.paths.slice(0, splits).padEnd(splits, "t");
       picks[name] = { tier, paths };
     }
-    return { slug: build.slug, level, picks, optimised };
+    return { slug: build.slug, level, picks, optimised, ...carried };
   };
 
   /**
@@ -285,6 +348,49 @@ export function createBuildCodec(dataset: CodecDataset): BuildCodec {
    * before the flag existed still read, and a reader that does not know about
    * it still gets the right build.
    */
+  /**
+   * The current-state segment, or "" when there is nothing to say.
+   *
+   * Entries are emitted in the record's own insertion order, so a state read
+   * out of a code writes back in the order it arrived and round trips. A
+   * caller assembling one by hand chooses its own order and gets it back.
+   */
+  const writeCurrent = (current: CurrentState | undefined): string => {
+    if (current === undefined) return "";
+    const parts: string[] = [];
+    if (current.aircraftLevel !== undefined) parts.push(String(current.aircraftLevel));
+    for (const [name, level] of Object.entries(current.systems)) {
+      const code = treeCodes.get(name);
+      // Same rule as the picks segment: a tree the dataset cannot name has no
+      // code to write, so it is dropped rather than emitted as a bare digit.
+      if (code === undefined) continue;
+      parts.push(`${code}${level === null ? "-" : level}`);
+    }
+    return parts.join("_");
+  };
+
+  const readCurrent = (rawCurrent: string | undefined): CurrentState | undefined => {
+    if (rawCurrent === undefined || rawCurrent === "") return undefined;
+    const systems: Record<string, number | null> = {};
+    let aircraftLevel: number | undefined;
+    const parts = rawCurrent.split("_");
+    parts.forEach((part, index) => {
+      // Only the leading token may be a bare level. Anywhere else a number is
+      // a mangled entry, and reading it as a level would invent a fact.
+      if (index === 0 && CURRENT_LEVEL_RE.test(part)) {
+        aircraftLevel = Number(part);
+        return;
+      }
+      const match = STATE_RE.exec(part);
+      if (match === null) return;
+      const name = treeByCode.get(match[1]);
+      if (name === undefined) return;
+      systems[name] = match[2] === "-" ? null : Number(match[2]);
+    });
+    if (aircraftLevel === undefined && Object.keys(systems).length === 0) return undefined;
+    return aircraftLevel === undefined ? { systems } : { aircraftLevel, systems };
+  };
+
   const write = (builds: readonly Build[]): string =>
     builds
       .map((build) => {
@@ -301,6 +407,14 @@ export function createBuildCodec(dataset: CodecDataset): BuildCodec {
           .filter((text) => text.length > 1)
           .join("_");
         const flag = build.optimised === true ? ".o" : "";
+        const current = writeCurrent(build.current);
+        if (current !== "") {
+          // Five segments, always. The flag slot is written even when empty so
+          // the current state keeps its position, which is what lets a reader
+          // that predates it skip the segment instead of mistaking it for the
+          // flag.
+          return `${build.slug}.${build.level}.${picks}.${build.optimised === true ? "o" : ""}.${current}`;
+        }
         // An optimised build always has picks. The empty segment keeps the
         // grammar positional rather than relying on that.
         return `${build.slug}.${build.level}${picks === "" && flag === "" ? "" : `.${picks}`}${flag}`;
@@ -317,7 +431,7 @@ export function createBuildCodec(dataset: CodecDataset): BuildCodec {
     if (raw === null || raw === undefined || raw.trim() === "") return [];
     const out: Build[] = [];
     for (const chunk of raw.split("*")) {
-      const [slug, rawLevel, rawPicks, rawFlag] = chunk.split(".");
+      const [slug, rawLevel, rawPicks, rawFlag, rawCurrent] = chunk.split(".");
       if (slug === undefined || !systemsBySlug.has(slug)) continue;
       const level = Number(rawLevel);
       const picks: Record<string, BuildPick> = {};
@@ -328,12 +442,14 @@ export function createBuildCodec(dataset: CodecDataset): BuildCodec {
         if (name === undefined) continue;
         picks[name] = { tier: Number(match[2]), paths: match[3] };
       }
+      const current = readCurrent(rawCurrent);
       out.push(
         clamp({
           slug,
           level: Number.isFinite(level) ? level : maxAircraftLevel,
           picks,
           optimised: rawFlag === "o",
+          ...(current === undefined ? {} : { current }),
         }),
       );
       if (out.length >= MAX_BUILDS) break;

@@ -55,6 +55,8 @@ async function loadOriginal(fixture) {
   return {
     write: (list) => builds.writeBuilds(list),
     read: (raw) => builds.readBuilds(raw, MAX_BUILDS),
+    clamp: (build) => builds.clampBuild(build),
+    maxBuilds: MAX_BUILDS,
     treeCodes: Object.fromEntries(builds.treeCodes),
     MAX_BUILDS,
     MAX_AIRCRAFT_LEVEL: builds.MAX_AIRCRAFT_LEVEL,
@@ -77,6 +79,8 @@ async function loadPackage(fixture) {
   return {
     write: (list) => codec.write(list),
     read: (raw) => codec.read(raw),
+    clamp: (build) => codec.clamp(build),
+    maxBuilds: codec.maxBuilds,
     treeCodes: Object.fromEntries(codec.treeCodes),
     MAX_BUILDS: codec.maxBuilds,
     MAX_AIRCRAFT_LEVEL: codec.maxAircraftLevel,
