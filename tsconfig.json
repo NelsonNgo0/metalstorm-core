@@ -5,6 +5,7 @@
        whichever of the two hosts didn't have it. */
     "target": "ES2022",
     "lib": ["ES2022"],
+    "types": [],
     "module": "ESNext",
     "moduleResolution": "bundler",
 
